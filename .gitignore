@@ -1,0 +1,7 @@
+.DS_Store
+node_modules/
+.build/
+dist/
+dist_swift-node/
+*.tgz
+npm-debug.log*

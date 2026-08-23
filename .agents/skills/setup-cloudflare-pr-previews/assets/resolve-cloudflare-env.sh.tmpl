@@ -1,0 +1,57 @@
+#!/bin/bash
+
+set -euo pipefail
+
+branch="${WORKERS_CI_BRANCH:-${CF_PAGES_BRANCH:-${BRANCH:-}}}"
+ci_build="${WORKERS_CI:-${CF_PAGES:-${CI:-}}}"
+worker_name="${WORKER_NAME:-}"
+has_production_url=false
+has_preview_url=false
+
+emit_env() {
+  printf '%s\n' "$1"
+  exit 0
+}
+
+is_main_branch() {
+  [ "$1" = "main" ] || [ "$1" = "master" ]
+}
+
+if [ -n "${DEPLOY_URL:-}" ]; then
+  has_production_url=true
+fi
+
+if [ -n "${PREVIEW_DEPLOY_URL:-}" ]; then
+  has_preview_url=true
+fi
+
+if [ -n "${CLOUDFLARE_ENV:-}" ]; then
+  emit_env "$CLOUDFLARE_ENV"
+fi
+
+case "$worker_name" in
+  @@APP_NAME@@)
+    emit_env "production"
+    ;;
+  @@PREVIEW_WORKER_NAME@@)
+    emit_env "preview"
+    ;;
+esac
+
+if [ "$has_production_url" = true ] && [ "$has_preview_url" = false ]; then
+  emit_env "production"
+fi
+
+if [ "$has_preview_url" = true ] && [ "$has_production_url" = false ]; then
+  emit_env "preview"
+fi
+
+if [ -n "$branch" ] || [ -n "$ci_build" ]; then
+  if is_main_branch "$branch"; then
+    emit_env "production"
+  fi
+
+  emit_env "preview"
+fi
+
+emit_env "development"

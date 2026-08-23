@@ -1,0 +1,13 @@
+CREATE TABLE IF NOT EXISTS "deployment_history" (
+  "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+  "branch" TEXT NOT NULL,
+  "deployed_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "build_id" TEXT,
+  "commit_sha" TEXT
+);
+
+CREATE INDEX IF NOT EXISTS "deployment_history_branch_idx"
+  ON "deployment_history"("branch");
+
+CREATE INDEX IF NOT EXISTS "deployment_history_deployed_at_idx"
+  ON "deployment_history"("deployed_at" DESC);

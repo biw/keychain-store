@@ -1,0 +1,69 @@
+# Cloudflare Setup
+
+The application uses two stable Worker projects and branch-isolated D1 previews:
+
+- production Worker: `@@APP_NAME@@`
+- preview Worker: `@@PREVIEW_WORKER_NAME@@`
+- production database: `@@APP_NAME@@-production`
+- stable preview database: `@@APP_NAME@@-staging`
+- branch database: `@@APP_NAME@@-preview-{sanitized-branch}`
+
+List every other binding here and state whether branch previews isolate or share it.
+
+## Workers Builds
+
+Connect the repository to both Worker projects. Use `pnpm bundle` as the build command and `pnpm deploy:dynamic` as the deploy command. On the preview project, also replace the separate non-production branch deploy command with `pnpm deploy:dynamic`; its default Wrangler upload would bypass D1 provisioning.
+
+- `@@APP_NAME@@`: set build variable `CLOUDFLARE_ENV=production`; build only the production branch.
+- `@@PREVIEW_WORKER_NAME@@`: set build variable `CLOUDFLARE_ENV=preview`; build the production branch and non-production branches.
+
+Verify the Workers Builds token for each project includes Account D1 Edit as well as Worker upload permissions. The dynamic deploy script lists, creates, migrates, and queries D1.
+
+Preview URLs are public when enabled unless Cloudflare Access protects them. Document whether public access is intended and configure an Access policy when it is not.
+
+The stable URLs belong in the `production` and `preview` vars in `wrangler.jsonc`. `DEPLOY_URL` and `PREVIEW_DEPLOY_URL` may override them.
+
+## Stable Resources
+
+Create stable D1 databases once:
+
+```bash
+pnpm wrangler d1 create @@APP_NAME@@-staging
+pnpm wrangler d1 create @@APP_NAME@@-production
+```
+
+Document one-time creation of stable R2, KV, queues, or other resources here. Branch databases are created automatically.
+
+## Deployment Lifecycle
+
+- Production builds migrate and deploy `@@APP_NAME@@` against `@@APP_NAME@@-production`.
+- The production branch on the preview project migrates and deploys `@@PREVIEW_WORKER_NAME@@` against `@@APP_NAME@@-staging`.
+- Other preview builds create or reuse `@@APP_NAME@@-preview-{sanitized-branch}`, migrate it, patch the `@@D1_BINDING@@` binding, and upload an aliased Worker version.
+- Every deploy records branch, build ID, commit SHA, and time in `deployment_history`.
+
+## Runtime Secrets and Variables
+
+Store non-secret variables in `wrangler.jsonc`. Configure Worker secrets separately for preview and production. Never put secret values in build variables intended only to choose an environment or in Wrangler `--var` arguments.
+
+The deploy script sets these variables to the active stable or aliased URL:
+
+```text
+@@URL_VARS_SHELL_ARRAY@@
+```
+
+## Cleanup
+
+When a pull request closes, `.github/workflows/cleanup-preview-db.yml` checks out trusted base-branch code and deletes the D1 database derived from the head branch.
+
+Configure:
+
+- GitHub repository variable `CLOUDFLARE_ACCOUNT_ID`
+- GitHub repository secret `CLOUDFLARE_API_TOKEN` with Account D1 Edit, scoped to the target account
+
+Manual cleanup:
+
+```bash
+pnpm cleanup:preview-db -- <branch-name>
+```
+
+Cleanup is idempotent and refuses to delete `main` or `master`. It does not delete shared bindings or Worker version history.

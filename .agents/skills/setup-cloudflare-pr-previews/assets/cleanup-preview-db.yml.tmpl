@@ -1,0 +1,37 @@
+name: Cleanup Preview Database
+
+on:
+  pull_request_target:
+    types:
+      - closed
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup-preview-db:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Delete preview D1 database
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: bash scripts/cleanup-preview-db.sh

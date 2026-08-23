@@ -1,0 +1,49 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/preview-resources.sh"
+
+branch="${1:-${BRANCH:-${GITHUB_HEAD_REF:-}}}"
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    die "Missing required command '$1'."
+  fi
+}
+
+require_command jq
+
+if [ -z "$branch" ]; then
+  die "A branch name is required."
+fi
+
+if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ] || [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+  die "Cloudflare credentials are not configured. Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN."
+fi
+
+if is_main_branch "$branch"; then
+  echo "Skipping preview database cleanup for protected branch '$branch'."
+  exit 0
+fi
+
+db_name="$(preview_database_name_for_branch "$branch")"
+if ! list_output=$(pnpm wrangler d1 list --json); then
+  die "Failed to list D1 databases while cleaning up '$db_name'."
+fi
+db_id=$(printf '%s' "$list_output" | jq -r --arg db_name "$db_name" \
+  '[.[] | select(.name == $db_name) | .uuid][0] // ""')
+
+if [ -z "$db_id" ]; then
+  echo "Preview database '$db_name' does not exist. Nothing to delete."
+  exit 0
+fi
+
+echo "Deleting preview database '$db_name' ($db_id)"
+pnpm wrangler d1 delete "$db_name" --skip-confirmation

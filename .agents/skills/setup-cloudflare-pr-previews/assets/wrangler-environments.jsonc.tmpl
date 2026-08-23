@@ -1,0 +1,46 @@
+{
+  "preview_urls": true,
+  "env": {
+    "development": {
+      "vars": {
+        "APP_ENV": "development"@@DEVELOPMENT_URL_VARS_JSON@@
+      },
+      "d1_databases": [
+        {
+          "binding": "@@D1_BINDING@@",
+          "database_name": "@@APP_NAME@@-development",
+          "database_id": "00000000-0000-0000-0000-000000000000",
+          "migrations_dir": "@@MIGRATIONS_DIR@@"
+        }
+      ]
+    },
+    "preview": {
+      "name": "@@PREVIEW_WORKER_NAME@@",
+      "vars": {
+        "APP_ENV": "preview"@@PREVIEW_URL_VARS_JSON@@
+      },
+      "d1_databases": [
+        {
+          "binding": "@@D1_BINDING@@",
+          "database_name": "@@APP_NAME@@-staging",
+          "database_id": "00000000-0000-0000-0000-000000000000",
+          "migrations_dir": "@@MIGRATIONS_DIR@@"
+        }
+      ]
+    },
+    "production": {
+      "name": "@@APP_NAME@@",
+      "vars": {
+        "APP_ENV": "production"@@PRODUCTION_URL_VARS_JSON@@
+      },
+      "d1_databases": [
+        {
+          "binding": "@@D1_BINDING@@",
+          "database_name": "@@APP_NAME@@-production",
+          "database_id": "00000000-0000-0000-0000-000000000000",
+          "migrations_dir": "@@MIGRATIONS_DIR@@"
+        }
+      ]
+    }
+  }
+}

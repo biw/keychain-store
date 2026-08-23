@@ -1,0 +1,10 @@
+{
+  "scripts": {
+    "bundle": "bash -c 'env_name=\"$(bash scripts/resolve-cloudflare-env.sh)\"; echo \"Building for Cloudflare environment: $env_name\"; CLOUDFLARE_ENV=\"$env_name\" vite build'",
+    "deploy": "pnpm run bundle && pnpm run deploy:dynamic",
+    "deploy:dynamic": "bash scripts/deploy.sh",
+    "cleanup:preview-db": "bash scripts/cleanup-preview-db.sh",
+    "cf-typegen": "wrangler types --env development",
+    "db:migrate:local": "wrangler d1 migrations apply @@D1_BINDING@@ --env development --local"
+  }
+}

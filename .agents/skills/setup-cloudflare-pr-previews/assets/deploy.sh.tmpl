@@ -1,0 +1,348 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+WRANGLER_CONFIG="$APP_DIR/wrangler.jsonc"
+MIGRATIONS_DIR="$APP_DIR/@@MIGRATIONS_DIR@@"
+TARGET_D1_BINDING="@@D1_BINDING@@"
+BUILT_WRANGLER_CONFIG="$APP_DIR/@@BUILT_CONFIG@@"
+URL_VAR_NAMES=(@@URL_VARS_SHELL_ARRAY@@)
+source "$SCRIPT_DIR/preview-resources.sh"
+
+BRANCH="${WORKERS_CI_BRANCH:-${CF_PAGES_BRANCH:-${BRANCH:-}}}"
+TARGET_ENV=""
+WRANGLER_ENV=""
+WORKER_NAME="${WORKER_NAME:-}"
+PREVIEW_ALIAS=""
+DEPLOY_MODE=""
+PRODUCTION_DEPLOY_URL_INPUT="${DEPLOY_URL:-}"
+PREVIEW_DEPLOY_URL_INPUT="${PREVIEW_DEPLOY_URL:-}"
+RESOLVED_DEPLOY_URL=""
+DB_ID=""
+DB_NAME=""
+TEMP_WRANGLER_CONFIG=""
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+create_temp_file() {
+  local prefix="$1"
+  local suffix="$2"
+  local directory="${3:-$APP_DIR}"
+  local temp_file
+
+  mkdir -p "$directory"
+  temp_file="$(mktemp "$directory/${prefix}.XXXXXX")"
+
+  if [ -n "$suffix" ]; then
+    local suffixed_file="${temp_file}${suffix}"
+    mv "$temp_file" "$suffixed_file"
+    temp_file="$suffixed_file"
+  fi
+
+  printf '%s\n' "$temp_file"
+}
+
+cleanup() {
+  [ -n "$TEMP_WRANGLER_CONFIG" ] && rm -f "$TEMP_WRANGLER_CONFIG"
+}
+
+trap cleanup EXIT
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    die "Missing required command '$1'."
+  fi
+}
+
+require_command jq
+
+TEMP_WRANGLER_CONFIG="$(create_temp_file ".cloudflare-preview-wrangler" ".jsonc" "$APP_DIR")"
+cp "$WRANGLER_CONFIG" "$TEMP_WRANGLER_CONFIG"
+
+sql_escape() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
+
+sanitize_branch_for_preview_alias() {
+  local branch="$1"
+  local worker_name="$2"
+  local max_len=$((63 - ${#worker_name} - 1))
+
+  if [ "$max_len" -lt 8 ]; then
+    die "Worker name '$worker_name' leaves no room for a preview alias."
+  fi
+
+  local sanitized
+  sanitized=$(printf '%s' "$branch" |
+    tr '[:upper:]' '[:lower:]' |
+    sed -E 's#[^a-z0-9-]+#-#g; s#-+#-#g; s#^-+##; s#-+$##')
+
+  if [ -z "$sanitized" ]; then
+    sanitized="preview"
+  fi
+
+  if [[ ! "$sanitized" =~ ^[a-z] ]]; then
+    sanitized="branch-$sanitized"
+  fi
+
+  sanitized="${sanitized:0:$max_len}"
+  sanitized="${sanitized%-}"
+
+  if [ -z "$sanitized" ] || [[ ! "$sanitized" =~ ^[a-z] ]]; then
+    sanitized="branch"
+  fi
+
+  printf '%s\n' "$sanitized"
+}
+
+resolve_workers_domain() {
+  local preview_url="$1"
+  local worker_name="$2"
+  local host="${preview_url#https://}"
+  host="${host#http://}"
+  host="${host%%/*}"
+
+  if [[ "$host" != "$worker_name".* ]]; then
+    die "PREVIEW_DEPLOY_URL must be rooted at ${worker_name}.* so branch preview URLs can be derived."
+  fi
+
+  printf '%s\n' "${host#${worker_name}.}"
+}
+
+resolve_config_deploy_url() {
+  local wrangler_env="$1"
+
+  jq -r \
+    --arg wrangler_env "$wrangler_env" \
+    '.env[$wrangler_env].vars.@@PRIMARY_URL_VAR@@ // .env[$wrangler_env].vars.@@FALLBACK_URL_VAR@@ // ""' \
+    "$WRANGLER_CONFIG"
+}
+
+resolve_d1_database_id_by_name() {
+  local db_name="$1"
+  local list_output
+
+  if ! list_output=$(pnpm wrangler d1 list --json); then
+    die "Failed to list D1 databases while resolving '$db_name'."
+  fi
+
+  printf '%s' "$list_output" | jq -r --arg db_name "$db_name" \
+    '[.[] | select(.name == $db_name) | .uuid][0] // ""'
+}
+
+patch_source_wrangler_database() {
+  local wrangler_env="$1"
+  local db_id="$2"
+  local db_name="$3"
+  local temp_file
+
+  temp_file="$(create_temp_file ".cloudflare-preview-wrangler-update" ".jsonc" "$APP_DIR")"
+
+  jq \
+    --arg wrangler_env "$wrangler_env" \
+    --arg binding "$TARGET_D1_BINDING" \
+    --arg database_id "$db_id" \
+    --arg database_name "$db_name" \
+    'if any(.env[$wrangler_env].d1_databases[]?; .binding == $binding)
+      then .env[$wrangler_env].d1_databases |= map(
+        if .binding == $binding
+          then .database_id = $database_id | .database_name = $database_name
+          else .
+        end
+      )
+      else error("D1 binding not found in selected Wrangler environment")
+    end' \
+    "$TEMP_WRANGLER_CONFIG" > "$temp_file"
+
+  mv "$temp_file" "$TEMP_WRANGLER_CONFIG"
+}
+
+patch_built_wrangler_database() {
+  local db_id="$1"
+  local db_name="$2"
+  local temp_file
+
+  if [ ! -f "$BUILT_WRANGLER_CONFIG" ]; then
+    die "Built Wrangler config not found at $BUILT_WRANGLER_CONFIG"
+  fi
+
+  temp_file="$(create_temp_file ".cloudflare-preview-built-wrangler" ".json" "$APP_DIR/.context/tmp")"
+
+  jq \
+    --arg binding "$TARGET_D1_BINDING" \
+    --arg database_id "$db_id" \
+    --arg database_name "$db_name" \
+    'if any(.d1_databases[]?; .binding == $binding)
+      then .d1_databases |= map(
+        if .binding == $binding
+          then .database_id = $database_id | .database_name = $database_name
+          else .
+        end
+      )
+      else error("D1 binding not found in built Wrangler config")
+    end' \
+    "$BUILT_WRANGLER_CONFIG" > "$temp_file"
+
+  mv "$temp_file" "$BUILT_WRANGLER_CONFIG"
+}
+
+d1_execute_remote() {
+  pnpm wrangler d1 execute "$TARGET_D1_BINDING" --config "$TEMP_WRANGLER_CONFIG" --env "$WRANGLER_ENV" --remote "$@"
+}
+
+run_migrations() {
+  local migration_files
+
+  migration_files=$(find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' | sort)
+  if [ -z "$migration_files" ]; then
+    die "No migration files found in $MIGRATIONS_DIR"
+  fi
+
+  echo "Running migrations on $DB_NAME"
+  pnpm wrangler d1 migrations apply "$TARGET_D1_BINDING" --config "$TEMP_WRANGLER_CONFIG" --env "$WRANGLER_ENV" --remote
+}
+
+verify_required_tables() {
+  local query_result
+  query_result=$(d1_execute_remote \
+    --command "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('deployment_history') ORDER BY name;" \
+    --json)
+
+  if ! printf '%s' "$query_result" | jq -e '.[0].results[]? | select(.name == "deployment_history")' >/dev/null 2>&1; then
+    die "Missing expected table 'deployment_history' on $DB_NAME"
+  fi
+}
+
+ensure_database_exists() {
+  local existing_db_id
+  existing_db_id=$(resolve_d1_database_id_by_name "$DB_NAME")
+
+  if [ -n "$existing_db_id" ]; then
+    echo "Using existing database: $DB_NAME"
+    patch_source_wrangler_database "$WRANGLER_ENV" "$existing_db_id" "$DB_NAME"
+    run_migrations
+    verify_required_tables
+    DB_ID="$existing_db_id"
+    return 0
+  fi
+
+  echo "Creating D1 database: $DB_NAME"
+  pnpm wrangler d1 create "$DB_NAME"
+
+  local created_db_id
+  created_db_id=$(resolve_d1_database_id_by_name "$DB_NAME")
+  if [ -z "$created_db_id" ]; then
+    die "Failed to resolve D1 database ID for $DB_NAME after creation."
+  fi
+
+  patch_source_wrangler_database "$WRANGLER_ENV" "$created_db_id" "$DB_NAME"
+  run_migrations
+  verify_required_tables
+  DB_ID="$created_db_id"
+}
+
+if [ -z "$BRANCH" ]; then
+  BRANCH="local-preview"
+fi
+
+TARGET_ENV="$(bash "$SCRIPT_DIR/resolve-cloudflare-env.sh")"
+
+if [ -z "$PRODUCTION_DEPLOY_URL_INPUT" ]; then
+  PRODUCTION_DEPLOY_URL_INPUT="$(resolve_config_deploy_url production)"
+fi
+
+if [ -z "$PREVIEW_DEPLOY_URL_INPUT" ]; then
+  PREVIEW_DEPLOY_URL_INPUT="$(resolve_config_deploy_url preview)"
+fi
+
+case "$TARGET_ENV" in
+  production)
+    if ! is_main_branch "$BRANCH"; then
+      die "The production Worker should only deploy main/master. Set BRANCH=main if you are deploying manually."
+    fi
+
+    if [ -z "$PRODUCTION_DEPLOY_URL_INPUT" ]; then
+      die "DEPLOY_URL is required for production deploys."
+    fi
+
+    WRANGLER_ENV="production"
+    WORKER_NAME="${WORKER_NAME:-@@APP_NAME@@}"
+    DEPLOY_MODE="live-production"
+    RESOLVED_DEPLOY_URL="$PRODUCTION_DEPLOY_URL_INPUT"
+    DB_NAME="@@APP_NAME@@-production"
+    DB_ID=$(resolve_d1_database_id_by_name "$DB_NAME")
+
+    if [ -z "$DB_ID" ]; then
+      die "Production database $DB_NAME does not exist yet. Create it once with 'pnpm wrangler d1 create $DB_NAME'."
+    fi
+
+    patch_source_wrangler_database "$WRANGLER_ENV" "$DB_ID" "$DB_NAME"
+    run_migrations
+    verify_required_tables
+    ;;
+  preview)
+    if [ -z "$PREVIEW_DEPLOY_URL_INPUT" ]; then
+      die "PREVIEW_DEPLOY_URL is required for preview deploys."
+    fi
+
+    WRANGLER_ENV="preview"
+    WORKER_NAME="${WORKER_NAME:-@@PREVIEW_WORKER_NAME@@}"
+
+    if is_main_branch "$BRANCH"; then
+      DEPLOY_MODE="live-preview"
+      RESOLVED_DEPLOY_URL="$PREVIEW_DEPLOY_URL_INPUT"
+      DB_NAME="@@APP_NAME@@-staging"
+    else
+      DEPLOY_MODE="branch-preview"
+      WORKERS_DOMAIN="$(resolve_workers_domain "$PREVIEW_DEPLOY_URL_INPUT" "$WORKER_NAME")"
+      PREVIEW_ALIAS="$(sanitize_branch_for_preview_alias "$BRANCH" "$WORKER_NAME")"
+      RESOLVED_DEPLOY_URL="https://${PREVIEW_ALIAS}-${WORKER_NAME}.${WORKERS_DOMAIN}"
+      DB_NAME="$(preview_database_name_for_branch "$BRANCH")"
+    fi
+
+    ensure_database_exists
+    ;;
+  *)
+    die "Unsupported CLOUDFLARE_ENV '$TARGET_ENV'. Expected preview or production."
+    ;;
+esac
+
+BRANCH_SQL=$(sql_escape "$BRANCH")
+COMMIT_SHA="${WORKERS_CI_COMMIT_SHA:-${CF_PAGES_COMMIT_SHA:-unknown}}"
+BUILD_ID="${WORKERS_CI_BUILD_UUID:-${CF_PAGES_BUILD_ID:-unknown}}"
+COMMIT_SHA_SQL=$(sql_escape "$COMMIT_SHA")
+BUILD_ID_SQL=$(sql_escape "$BUILD_ID")
+
+echo "Branch: $BRANCH"
+echo "Target environment: $TARGET_ENV"
+echo "Wrangler environment: $WRANGLER_ENV"
+echo "Deploy mode: $DEPLOY_MODE"
+echo "Worker: $WORKER_NAME"
+echo "Deploy URL: $RESOLVED_DEPLOY_URL"
+echo "Database: $DB_NAME ($DB_ID)"
+
+patch_built_wrangler_database "$DB_ID" "$DB_NAME"
+
+VAR_FLAGS=()
+for var_name in "${URL_VAR_NAMES[@]}"; do
+  VAR_FLAGS+=(--var "${var_name}:${RESOLVED_DEPLOY_URL}")
+done
+
+if [ "$TARGET_ENV" = "production" ]; then
+  echo "Running wrangler deploy with the flattened production build config..."
+  pnpm wrangler deploy --config "$BUILT_WRANGLER_CONFIG" "${VAR_FLAGS[@]}"
+elif [ "$DEPLOY_MODE" = "live-preview" ]; then
+  echo "Running wrangler deploy with the flattened preview build config..."
+  pnpm wrangler deploy --config "$BUILT_WRANGLER_CONFIG" "${VAR_FLAGS[@]}"
+else
+  echo "Running wrangler versions upload with the flattened preview build config..."
+  pnpm wrangler versions upload --config "$BUILT_WRANGLER_CONFIG" --preview-alias "$PREVIEW_ALIAS" "${VAR_FLAGS[@]}"
+  echo "Preview URL: $RESOLVED_DEPLOY_URL"
+fi
+
+d1_execute_remote --command "INSERT INTO deployment_history (branch, deployed_at, build_id, commit_sha) VALUES ('$BRANCH_SQL', datetime('now'), '$BUILD_ID_SQL', '$COMMIT_SHA_SQL');"

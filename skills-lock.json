@@ -5,7 +5,7 @@
       "source": "biw/skills",
       "sourceType": "github",
       "skillPath": "skills/conductor-setup/SKILL.md",
-      "computedHash": "722fa45163cba78ebcf7af0d6ded4dc92848073098db16c1b65702a6f420f3ea"
+      "computedHash": "946ccb7c75b0d1edbd64a88b5701ded25988d16a987835843aec651f02e855ef"
     },
     "detailed-pr-description": {
       "source": "biw/skills",
@@ -17,13 +17,13 @@
       "source": "biw/skills",
       "sourceType": "github",
       "skillPath": "skills/review-fix-address-bots/SKILL.md",
-      "computedHash": "9bd0fb94f989133fb0a6d35c5fc75dc6da8a22c4c1737bff33491778bc005934"
+      "computedHash": "44f5a087d34e444abf84a783f0a6e84ffc6be6b471c10149a7750e6416495a19"
     },
     "setup-cloudflare-pr-previews": {
       "source": "biw/skills",
       "sourceType": "github",
       "skillPath": "skills/setup-cloudflare-pr-previews/SKILL.md",
-      "computedHash": "00b79f0b53f4393275c74b9e35a9c01f3cc527e92e3fd863493178fabd5ed913"
+      "computedHash": "2fe13b444d81383455b5daf060bcb9ffea8a81edba2e485af8c5e7e737e4dd90"
     }
   }
 }

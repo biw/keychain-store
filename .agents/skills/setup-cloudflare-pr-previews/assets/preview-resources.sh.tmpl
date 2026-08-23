@@ -1,0 +1,25 @@
+is_main_branch() {
+  [ "$1" = "main" ] || [ "$1" = "master" ]
+}
+
+sanitize_branch_for_db() {
+  local branch="$1"
+  local sanitized
+  sanitized=$(printf '%s' "$branch" |
+    tr '[:upper:]' '[:lower:]' |
+    tr '/' '-' |
+    tr '.' '_' |
+    sed -E 's/[^a-z0-9_-]+/-/g; s/-+/-/g; s/_+/_/g; s/^-+//; s/-+$//')
+
+  if [ -z "$sanitized" ]; then
+    sanitized="preview"
+  fi
+
+  printf '%s\n' "$sanitized"
+}
+
+preview_database_name_for_branch() {
+  local branch="$1"
+  local db_name="@@APP_NAME@@-preview-$(sanitize_branch_for_db "$branch")"
+  printf '%s\n' "${db_name:0:64}"
+}

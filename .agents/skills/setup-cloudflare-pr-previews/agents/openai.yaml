@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cloudflare PR Previews"
+  short_description: "Create isolated Worker and D1 PR previews"
+  default_prompt: "Use $setup-cloudflare-pr-previews to add isolated Cloudflare Worker and D1 preview environments to a project."
